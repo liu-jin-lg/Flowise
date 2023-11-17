@@ -1,27 +1,32 @@
-import { useState, useRef, useEffect } from 'react'
+import { useContext, useEffect, useRef, useState } from 'react'
 import { useDispatch } from 'react-redux'
-import PropTypes from 'prop-types'
 
-import { ClickAwayListener, Paper, Popper, Button } from '@mui/material'
+import { Button, ClickAwayListener, Paper, Popper } from '@mui/material'
 import { useTheme } from '@mui/material/styles'
-import { IconMessage, IconX, IconEraser, IconArrowsMaximize } from '@tabler/icons'
+import { IconArrowsMaximize, IconDatabaseImport, IconEraser, IconFileUpload, IconMessage, IconX } from '@tabler/icons'
 
 // project import
+import { cloneDeep, omit } from 'lodash'
+import { useSelector } from 'react-redux'
+import { flowContext } from 'store/context/ReactFlowContext'
 import { StyledFab } from 'ui-component/button/StyledFab'
 import MainCard from 'ui-component/cards/MainCard'
 import Transitions from 'ui-component/extended/Transitions'
-import { ChatMessage } from './ChatMessage'
 import ChatExpandDialog from './ChatExpandDialog'
+import { ChatMessage } from './ChatMessage'
 
 // api
+import chatflowsApi from 'api/chatflows'
 import chatmessageApi from 'api/chatmessage'
 
 // Hooks
+import useApi from 'hooks/useApi'
 import useConfirm from 'hooks/useConfirm'
 import useNotifier from 'utils/useNotifier'
 
 // Const
-import { enqueueSnackbar as enqueueSnackbarAction, closeSnackbar as closeSnackbarAction } from 'store/actions'
+import { closeSnackbar as closeSnackbarAction, enqueueSnackbar as enqueueSnackbarAction } from 'store/actions'
+import { FLOWISE_CREDENTIAL_ID } from 'store/constant'
 
 export const ChatPopUp = ({ chatflowid }) => {
     const theme = useTheme()
@@ -33,11 +38,21 @@ export const ChatPopUp = ({ chatflowid }) => {
     const closeSnackbar = (...args) => dispatch(closeSnackbarAction(...args))
 
     const [open, setOpen] = useState(false)
+    const [textFile, setTextFile] = useState(null)
     const [showExpandDialog, setShowExpandDialog] = useState(false)
     const [expandDialogProps, setExpandDialogProps] = useState({})
 
     const anchorRef = useRef(null)
     const prevOpen = useRef(open)
+    const textFileInputRef = useRef(null)
+
+    const canvas = useSelector((state) => state.canvas)
+    const [canvasDataStore, setCanvasDataStore] = useState(canvas)
+    const [chatflow, setChatflow] = useState(null)
+
+    const { reactFlowInstance, setReactFlowInstance } = useContext(flowContext)
+
+    const updateChatflowApi = useApi(chatflowsApi.updateChatflow)
 
     const handleClose = (event) => {
         if (anchorRef.current && anchorRef.current.contains(event.target)) {
@@ -120,6 +135,120 @@ export const ChatPopUp = ({ chatflowid }) => {
         }
     }
 
+    const openFileSelectDialog = () => {
+        textFileInputRef.current.click()
+    }
+
+    const handleFileChange = async (e) => {
+        if (!e.target.files) return
+        if (reactFlowInstance) {
+            const nodes = reactFlowInstance.getNodes().map((node) => {
+                const nodeData = cloneDeep(node.data)
+                if (Object.prototype.hasOwnProperty.call(nodeData.inputs, FLOWISE_CREDENTIAL_ID)) {
+                    nodeData.credential = nodeData.inputs[FLOWISE_CREDENTIAL_ID]
+                    nodeData.inputs = omit(nodeData.inputs, [FLOWISE_CREDENTIAL_ID])
+                }
+                node.data = {
+                    ...nodeData,
+                    selected: false
+                }
+                return node
+            })
+
+            if (e.target.files.length === 1) {
+                const file = e.target.files[0]
+                const { name } = file
+
+                const reader = new FileReader()
+                reader.onload = (evt) => {
+                    if (!evt?.target?.result) {
+                        return
+                    }
+                    const { result } = evt.target
+                    const value = result + `,filename:${name}`
+
+                    let editFlag = false
+                    for (let i = 0; i < nodes.length; i++) {
+                        const node = nodes[i]
+                        if (node.data.inputs.txtFile) {
+                            if (!editFlag) {
+                                node.data.inputs.txtFile = value
+                                editFlag = true
+                            } else {
+                                nodes.splice(i, 1)
+                                i--
+                            }
+                        }
+                    }
+
+                    const rfInstanceObject = reactFlowInstance.toObject()
+                    rfInstanceObject.nodes = nodes
+                    const flowData = JSON.stringify(rfInstanceObject)
+                    const updateBody = {
+                        name: chatflow.name,
+                        flowData
+                    }
+
+                    updateChatflowApi.request(chatflow.id, updateBody)
+                    e.target.value = ''
+                }
+                reader.readAsDataURL(file)
+            } else if (e.target.files.length > 0) {
+                let files = Array.from(e.target.files).map((file) => {
+                    const reader = new FileReader()
+                    const { name } = file
+
+                    return new Promise((resolve) => {
+                        reader.onload = (evt) => {
+                            if (!evt?.target?.result) {
+                                return
+                            }
+                            const { result } = evt.target
+                            const value = result + `,filename:${name}`
+                            resolve(value)
+                            setTextFile(value)
+                        }
+
+                        reader.readAsDataURL(file)
+                    })
+                })
+
+                Promise.all(files).then((res) => {
+                    let editFlag = false
+                    for (let i = 0; i < nodes.length; i++) {
+                        const node = nodes[i]
+                        if (node.data.inputs.txtFile) {
+                            if (!editFlag) {
+                                node.data.inputs.txtFile = JSON.stringify(res)
+                                editFlag = true
+                            } else {
+                                nodes.splice(i, 1)
+                                i--
+                            }
+                        }
+                    }
+
+                    const rfInstanceObject = reactFlowInstance.toObject()
+                    rfInstanceObject.nodes = nodes
+                    const flowData = JSON.stringify(rfInstanceObject)
+                    const updateBody = {
+                        name: chatflow.name,
+                        flowData
+                    }
+
+                    updateChatflowApi.request(chatflow.id, updateBody)
+                    e.target.value = ''
+                })
+            }
+        }
+    }
+
+    useEffect(() => {
+        setCanvasDataStore(canvas)
+    }, [canvas])
+
+    useEffect(() => setChatflow(canvasDataStore.chatflow), [canvasDataStore.chatflow])
+
     useEffect(() => {
         if (prevOpen.current === true && open === false) {
             anchorRef.current.focus()
@@ -142,9 +271,27 @@ export const ChatPopUp = ({ chatflowid }) => {
             >
                 {open ? <IconX /> : <IconMessage />}
             </StyledFab>
+            <input
+                type='file'
+                multiple
+                hidden
+                accept='.txt, .html, .aspx, .asp, .cpp, .c, .cs, .css, .go, .h, .java, .js, .less, .ts, .php, .proto, .python, .py, .rst, .ruby, .rb, .rs, .scala, .sc, .scss, .sol, .sql, .swift, .markdown, .md, .tex, .ltx, .vb, .xml'
+                ref={textFileInputRef}
+                onChange={(e) => handleFileChange(e)}
+            />
+            <StyledFab
+                sx={{ position: 'absolute', right: 80, top: 20 }}
+                onClick={openFileSelectDialog}
+                size='small'
+                color='primary'
+                aria-label='upload'
+                title='Upload QA File'
+            >
+                <IconFileUpload />
+            </StyledFab>
             {open && (
                 <StyledFab
-                    sx={{ position: 'absolute', right: 80, top: 20 }}
+                    sx={{ position: 'absolute', right: 140, top: 20 }}
                     onClick={clearChat}
                     size='small'
                     color='error'
@@ -156,7 +303,7 @@ export const ChatPopUp = ({ chatflowid }) => {
             )}
             {open && (
                 <StyledFab
-                    sx={{ position: 'absolute', right: 140, top: 20 }}
+                    sx={{ position: 'absolute', right: 200, top: 20 }}
                     onClick={expandChat}
                     size='small'
                     color='primary'
@@ -164,6 +311,18 @@ export const ChatPopUp = ({ chatflowid }) => {
                     title='Expand Chat'
                 >
                     <IconArrowsMaximize />
+                </StyledFab>
+            )}
+            {open && (
+                <StyledFab
+                    sx={{ position: 'absolute', right: 260, top: 20 }}
+                    onClick={expandChat}
+                    size='small'
+                    color='primary'
+                    aria-label='save'
+                    title='Save Chat History To DB'
+                >
+                    <IconDatabaseImport />
                 </StyledFab>
             )}
             <Popper
